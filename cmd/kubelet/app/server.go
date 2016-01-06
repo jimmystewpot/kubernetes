@@ -798,7 +798,11 @@ func RunKubelet(kcfg *KubeletConfig) error {
 			glog.V(2).Infof("cloud provider determined current node name to be %s", nodeName)
 		}
 
-		kcfg.NodeName = nodeName
+		if len(kcfg.HostnameOverride) != 0 {
+			kcfg.NodeName = kcfg.HostnameOverride
+		} else {
+			kcfg.NodeName = nodeName
+		}
 	}
 
 	eventBroadcaster := record.NewBroadcaster()
