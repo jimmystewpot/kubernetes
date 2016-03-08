@@ -53,6 +53,8 @@ var (
 	argEtcdServer          = flag.String("etcd-server", "http://127.0.0.1:4001", "URL to etcd server")
 	argKubecfgFile         = flag.String("kubecfg_file", "", "Location of kubecfg file for access to kubernetes master service; --kube_master_url overrides the URL part of this; if neither this nor --kube_master_url are provided, defaults to service account tokens")
 	argKubeMasterURL       = flag.String("kube_master_url", "", "URL to reach kubernetes master. Env variables in this flag will be expanded.")
+	argMinions             = flag.Bool("minions", "", "Enable kublet node DNS.")
+	argMinionsNameSpace    = flag.String("minions_namespace", "", "The namespace to add minion records for.")
 )
 
 const (
@@ -415,6 +417,26 @@ func (ks *kube2sky) updateService(oldObj, newObj interface{}) {
 	ks.newService(newObj)
 }
 
+func (ks *kube2sky) newMinion(obj interface{}) {
+	if s, ok := obj.(*kapi.Node); ok {
+		name := buildDNSNameString(ks.domain, serviceSubdomain, s.Namespace, s.Name)
+		ks.mutateEtcdOrDie(func() error { return ks.addDNS(name, s) })
+	}
+}
+
+func (ks *kube2sky) removeMinion(obj interface{}) {
+	if s, ok := obj.(*kapi.Node); ok {
+		name := buildDNSNameString(ks.domain, serviceSubdomain, s.Namespace, s.Name)
+		ks.mutateEtcdOrDie(func() error { return ks.removeDNS(name) })
+	}
+}
+
+func (ks *kube2sky) updateMinion(oldObj, newObj interface{}) {
+	// TODO: Avoid unwanted updates.
+	ks.removeService(oldObj)
+	ks.newService(newObj)
+}
+
 func newEtcdClient(etcdServer string) (*etcd.Client, error) {
 	var (
 		client *etcd.Client
@@ -556,6 +578,21 @@ func watchPods(kubeClient *kclient.Client, ks *kube2sky) kcache.Store {
 	return eStore
 }
 
+func watchForMinions(kubeClient *kclient.Client, ks *kube2sky) kcache.Store {
+	nodeStore, serviceController := kframework.NewInformer(
+		createServiceLW(kubeClient),
+		&kapi.Node{},
+		resyncPeriod,
+		kframework.ResourceEventHandlerFuncs{
+			AddFunc:    ks.newMinion,
+			DeleteFunc: ks.removeMinion,
+			UpdateFunc: ks.updateMinion,
+		},
+	)
+	go serviceController.Run(util.NeverStop)
+	return nodeStore
+}
+
 func getHash(text string) string {
 	h := fnv.New32a()
 	h.Write([]byte(text))
@@ -586,6 +623,10 @@ func main() {
 	ks.endpointsStore = watchEndpoints(kubeClient, &ks)
 	ks.servicesStore = watchForServices(kubeClient, &ks)
 	ks.podsStore = watchPods(kubeClient, &ks)
+
+	if argMinions {
+		ks.nodeStore = watchForMinions(kubeClient, &ks)
+	}
 
 	select {}
 }
